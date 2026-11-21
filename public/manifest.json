@@ -1,0 +1,18 @@
+{
+  "name": "Family English AI",
+  "short_name": "Family English",
+  "description": "Tutor pessoal de inglês com IA Gemini para toda a família.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
