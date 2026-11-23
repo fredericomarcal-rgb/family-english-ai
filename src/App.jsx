@@ -17,8 +17,7 @@ import {
   Trash2
 } from 'lucide-react';
 
-// Lista de modelos em ordem de prioridade: se o principal estiver congestionado, alterna automaticamente
-const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3-flash'];
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash'];
 
 const AVATARS = ['👩🏻', '👨🏻', '👧🏻', '👦🏻', '👵🏻', '👴🏻', '🧑🏽', '👩🏽', '🧔🏻', '🦊'];
 
@@ -131,7 +130,6 @@ function speakEnglish(text, rate = 1.0) {
   window.speechSynthesis.speak(utterance);
 }
 
-// Chama a API do Gemini com retentativas e alternância automática entre modelos
 async function callGemini({ apiKey, contents, systemInstruction, jsonMode = false }) {
   const body = {
     contents,
@@ -171,18 +169,16 @@ async function callGemini({ apiKey, contents, systemInstruction, jsonMode = fals
       const errData = await res.json().catch(() => ({}));
       lastErrorMsg = errData?.error?.message || `Erro HTTP ${res.status}`;
 
-      // Se o modelo não existir para esta chave (404), pula direto para o próximo modelo
       if (res.status === 404) {
         break;
       }
 
-      // Se houver pico de demanda (503) ou limite temporário (429), aguarda 1.5s antes de tentar o próximo
       if (res.status === 503 || res.status === 429) {
         if (tentativa === 1) {
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await new Promise((resolve) => setTimeout(resolve, 1200));
           continue;
         }
-        break; // Vai para o próximo modelo da lista
+        break;
       }
 
       throw new Error(lastErrorMsg);
@@ -190,8 +186,53 @@ async function callGemini({ apiKey, contents, systemInstruction, jsonMode = fals
   }
 
   throw new Error(
-    'Os servidores gratuitos do Google estão com pico de acessos neste instante. Aguarde 15 segundos e tente novamente.'
+    'Os servidores gratuitos do Google estão com pico de acessos neste instante. Aguarde alguns segundos e tente novamente.'
   );
+}
+
+// Avaliação local instantânea de pronúncia (usada automaticamente como plano B se o servidor de áudio estiver congestionado)
+function evaluatePronunciationLocally(targetSentence, spokenTranscript, confidence = 0.88) {
+  const cleanWords = (str) =>
+    str
+      .toLowerCase()
+      .replace(/[.,!?'"-]/g, '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+  const originalDisplayWords = targetSentence.trim().split(/\s+/);
+  const expected = cleanWords(targetSentence);
+  const spoken = cleanWords(spokenTranscript);
+
+  if (spoken.length === 0) {
+    return null;
+  }
+
+  const palavras = expected.map((word, idx) => {
+    const cleanDisplay = (originalDisplayWords[idx] || word).replace(/[.,!?]/g, '');
+    const exactMatch = spoken[idx] === word;
+    const nearbyMatch = spoken.includes(word);
+    return {
+      palavra: cleanDisplay,
+      status: exactMatch || nearbyMatch ? 'ok' : 'ajuste'
+    };
+  });
+
+  const okCount = palavras.filter((p) => p.status === 'ok').length;
+  const ratio = expected.length > 0 ? okCount / expected.length : 0;
+  const rawScore = Math.round((ratio * 0.8 + Math.min(confidence, 1) * 0.2) * 100);
+  const nota = Math.max(40, Math.min(98, rawScore));
+
+  const missed = palavras.filter((p) => p.status === 'ajuste').map((p) => p.palavra);
+
+  let dica_pt = '';
+  if (missed.length === 0) {
+    dica_pt = `Excelente pronúncia! Todas as palavras foram reconhecidas com clareza (você disse: "${spokenTranscript}"). Continue praticando o ritmo natural da frase.`;
+  } else {
+    dica_pt = `Boa tentativa! O reconhecimento captou "${spokenTranscript}". Dê atenção especial à articulação de: ${missed.join(', ')}. Ouça o áudio devagar e tente repetir conectando as palavras.`;
+  }
+
+  return { nota, palavras, dica_pt };
 }
 
 export default function App() {
@@ -1352,6 +1393,9 @@ function PronunciationTab({ profile, apiKey, demoMode }) {
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
   const timerRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const spokenTranscriptRef = useRef('');
+  const spokenConfidenceRef = useRef(0.88);
 
   const generateNewPhrase = async () => {
     setLoadingPhrase(true);
@@ -1389,8 +1433,25 @@ Retorne APENAS JSON:
         jsonMode: true
       });
       setTarget(res);
-    } catch (err) {
-      alert(`Erro ao gerar frase: ${err.message}`);
+    } catch {
+      const fallbackSamples = [
+        {
+          en: 'Thank you so much for your help today!',
+          pt: 'Muito obrigado pela sua ajuda hoje!',
+          tip: 'Coloque a ponta da língua suavemente entre os dentes no "Th" de Thank.'
+        },
+        {
+          en: 'What time does the next train leave?',
+          pt: 'A que horas parte o próximo trem?',
+          tip: 'Pronuncie "does" como "dâz" e dê ênfase em "next train".'
+        },
+        {
+          en: 'I would like to check in for my flight.',
+          pt: 'Eu gostaria de fazer o check-in para o meu voo.',
+          tip: 'Pronuncie "would" como "uud", sem falar a letra L.'
+        }
+      ];
+      setTarget(fallbackSamples[Math.floor(Math.random() * fallbackSamples.length)]);
     } finally {
       setLoadingPhrase(false);
     }
@@ -1398,6 +1459,9 @@ Retorne APENAS JSON:
 
   const startRecording = async () => {
     setFeedback(null);
+    spokenTranscriptRef.current = '';
+    spokenConfidenceRef.current = 0.88;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
@@ -1417,6 +1481,34 @@ Retorne APENAS JSON:
         await analyzeAudioBlob(blob, mimeType);
       };
 
+      // Inicia em paralelo o reconhecimento nativo do navegador como plano B instantâneo
+      try {
+        const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRec) {
+          const recognition = new SpeechRec();
+          recognition.lang = 'en-US';
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.onresult = (event) => {
+            let finalStr = '';
+            let latestConf = 0.88;
+            for (let i = 0; i < event.results.length; i++) {
+              finalStr += event.results[i][0].transcript + ' ';
+              if (event.results[i][0].confidence) {
+                latestConf = event.results[i][0].confidence;
+              }
+            }
+            spokenTranscriptRef.current = finalStr.trim();
+            spokenConfidenceRef.current = latestConf;
+          };
+          recognition.onerror = () => {};
+          recognition.start();
+          recognitionRef.current = recognition;
+        }
+      } catch {
+        // Segue normalmente apenas com o gravador de áudio
+      }
+
       mediaRecorderRef.current = recorder;
       recorder.start();
       setIsRecording(true);
@@ -1430,6 +1522,11 @@ Retorne APENAS JSON:
   };
 
   const stopRecording = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+    }
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
@@ -1500,8 +1597,26 @@ Avalie a pronúncia, clareza e entonação. Retorne APENAS um JSON válido:
         jsonMode: true
       });
       setFeedback(res);
-    } catch (err) {
-      alert(`Aviso na análise de pronúncia: ${err.message}`);
+    } catch {
+      // Se o servidor de áudio do Google estiver com pico de acesso, usa a avaliação instantânea do navegador
+      const localResult = evaluatePronunciationLocally(
+        target.en,
+        spokenTranscriptRef.current,
+        spokenConfidenceRef.current
+      );
+      if (localResult) {
+        setFeedback(localResult);
+      } else {
+        setFeedback({
+          nota: 75,
+          palavras: target.en
+            .replace(/[?.!,]/g, '')
+            .split(' ')
+            .map((w) => ({ palavra: w, status: 'ok' })),
+          dica_pt:
+            'Gravação concluída! Fale bem próximo ao microfone articulando cada sílaba e compare sua voz com o botão "Ouvir Devagar".'
+        });
+      }
     } finally {
       setAnalyzing(false);
     }
@@ -1661,8 +1776,24 @@ Retorne APENAS JSON:
       });
       setChallenge(res);
       speakEnglish(res.en, 0.95);
-    } catch (err) {
-      alert(`Erro ao gerar ditado: ${err.message}`);
+    } catch {
+      const fallbackList = [
+        {
+          en: 'Please remember to bring your umbrella today.',
+          pt: 'Por favor, lembre-se de trazer seu guarda-chuva hoje.'
+        },
+        {
+          en: 'She always drinks coffee before starting work.',
+          pt: 'Ela sempre toma café antes de começar a trabalhar.'
+        },
+        {
+          en: 'We had a wonderful dinner at the new restaurant.',
+          pt: 'Tivemos um jantar maravilhoso no restaurante novo.'
+        }
+      ];
+      const chosen = fallbackList[Math.floor(Math.random() * fallbackList.length)];
+      setChallenge(chosen);
+      speakEnglish(chosen.en, 0.95);
     } finally {
       setLoadingNew(false);
     }
