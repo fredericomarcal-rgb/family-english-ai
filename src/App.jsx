@@ -7,22 +7,18 @@ import {
   Volume2,
   Sparkles,
   Send,
-  CheckCircle2,
-  XCircle,
   ArrowLeft,
   Plus,
-  UserCheck,
   Lightbulb,
   Square,
   RefreshCw,
-  Award,
   Languages,
   KeyRound,
-  Trash2,
-  HelpCircle
+  Trash2
 } from 'lucide-react';
 
-const GEMINI_MODEL = 'gemini-3.8-flash';
+// Lista de modelos em ordem de prioridade: se o principal estiver congestionado, alterna automaticamente
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3-flash'];
 
 const AVATARS = ['👩🏻', '👨🏻', '👧🏻', '👦🏻', '👵🏻', '👴🏻', '🧑🏽', '👩🏽', '🧔🏻', '🦊'];
 
@@ -117,7 +113,6 @@ const PLACEMENT_QUESTIONS = [
   }
 ];
 
-// Helper para síntese de voz (TTS)
 function speakEnglish(text, rate = 1.0) {
   if (!('speechSynthesis' in window)) {
     alert('Seu navegador não suporta reprodução de áudio.');
@@ -136,9 +131,8 @@ function speakEnglish(text, rate = 1.0) {
   window.speechSynthesis.speak(utterance);
 }
 
-// Helper para chamar a API REST do Gemini com tentativas automáticas em picos de procura
+// Chama a API do Gemini com retentativas e alternância automática entre modelos
 async function callGemini({ apiKey, contents, systemInstruction, jsonMode = false }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const body = {
     contents,
     generationConfig: {
@@ -152,39 +146,55 @@ async function callGemini({ apiKey, contents, systemInstruction, jsonMode = fals
     };
   }
 
-  for (let tentativa = 1; tentativa <= 3; tentativa++) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+  let lastErrorMsg = '';
 
-    if (res.ok) {
-      const data = await res.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      if (jsonMode) {
-        const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        return JSON.parse(cleaned);
+  for (const model of GEMINI_MODELS) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (jsonMode) {
+          const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          return JSON.parse(cleaned);
+        }
+        return text;
       }
-      return text;
-    }
 
-    if ((res.status === 503 || res.status === 429) && tentativa < 3) {
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-      continue;
-    }
+      const errData = await res.json().catch(() => ({}));
+      lastErrorMsg = errData?.error?.message || `Erro HTTP ${res.status}`;
 
-    const errData = await res.json().catch(() => ({}));
-    const msg =
-      res.status === 503
-        ? 'O servidor do Gemini está momentaneamente ocupado. Tente novamente dentro de alguns segundos.'
-        : errData?.error?.message || `Erro HTTP ${res.status}`;
-    throw new Error(msg);
+      // Se o modelo não existir para esta chave (404), pula direto para o próximo modelo
+      if (res.status === 404) {
+        break;
+      }
+
+      // Se houver pico de demanda (503) ou limite temporário (429), aguarda 1.5s antes de tentar o próximo
+      if (res.status === 503 || res.status === 429) {
+        if (tentativa === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          continue;
+        }
+        break; // Vai para o próximo modelo da lista
+      }
+
+      throw new Error(lastErrorMsg);
+    }
   }
+
+  throw new Error(
+    'Os servidores gratuitos do Google estão com pico de acessos neste instante. Aguarde 15 segundos e tente novamente.'
+  );
 }
 
 export default function App() {
-  // Configurações e Perfis
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('family_en_api_key') || '');
   const [demoMode, setDemoMode] = useState(() => localStorage.getItem('family_en_demo_mode') === 'true');
   const [showKeyModal, setShowKeyModal] = useState(false);
@@ -199,17 +209,15 @@ export default function App() {
   });
   const [activeProfileId, setActiveProfileId] = useState(() => localStorage.getItem('family_en_active_id') || null);
 
-  // Fluxo de Criação de Perfil + Nivelamento
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [newName, setNewName] = useState('');
   const [newAvatar, setNewAvatar] = useState('👩🏻');
-  const [placementStep, setPlacementStep] = useState(0); // 0 = nome/avatar, 1..5 = perguntas
+  const [placementStep, setPlacementStep] = useState(0);
   const [placementAnswers, setPlacementAnswers] = useState([]);
   const [freeWriting, setFreeWriting] = useState('');
   const [evaluatingLevel, setEvaluatingLevel] = useState(false);
 
-  // Navegação Principal
-  const [activeTab, setActiveTab] = useState('roleplay'); // 'roleplay' | 'pronunciation' | 'dictation'
+  const [activeTab, setActiveTab] = useState('roleplay');
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
 
@@ -291,7 +299,7 @@ Retorne APENAS um JSON válido com as chaves:
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           jsonMode: true
         });
-      } catch (err) {
+      } catch {
         if (totalScore >= 7 && writtenText.length > 15) {
           result = {
             nivel: 'Avançado',
@@ -345,7 +353,6 @@ Retorne APENAS um JSON válido com as chaves:
     if (activeProfileId === id) setActiveProfileId(null);
   };
 
-  // TELA 1: Configuração Inicial da Chave API
   if (!isConfigured) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
@@ -406,7 +413,6 @@ Retorne APENAS um JSON válido com as chaves:
     );
   }
 
-  // TELA 2: Criação de Perfil + Teste de Nivelamento em 5 Passos
   if (creatingProfile) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
@@ -556,7 +562,6 @@ Retorne APENAS um JSON válido com as chaves:
     );
   }
 
-  // TELA 3: Seletor de Perfis da Família ("Quem vai estudar agora?")
   if (!activeProfile) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
@@ -641,11 +646,9 @@ Retorne APENAS um JSON válido com as chaves:
     );
   }
 
-  // TELA 4: Aplicativo Principal (Roleplay, Pronúncia, Ditado)
   return (
     <div className="min-h-screen bg-slate-100 flex justify-center">
       <div className="w-full max-w-md bg-white min-h-screen flex flex-col shadow-xl relative">
-        {/* Cabeçalho */}
         <header className="px-4 py-3 bg-indigo-600 text-white flex items-center justify-between sticky top-0 z-20 shadow-sm">
           <button
             onClick={() => setActiveProfileId(null)}
@@ -684,7 +687,6 @@ Retorne APENAS um JSON válido com as chaves:
           </div>
         </header>
 
-        {/* Conteúdo das Abas */}
         <main className="flex-1 flex flex-col overflow-hidden pb-20">
           {activeTab === 'roleplay' && (
             <RoleplayTab profile={activeProfile} apiKey={apiKey} demoMode={demoMode} />
@@ -697,7 +699,6 @@ Retorne APENAS um JSON válido com as chaves:
           )}
         </main>
 
-        {/* Barra de Navegação Inferior (Mobile-First) */}
         <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-slate-200 px-2 py-2 pb-safe flex justify-around items-center z-20">
           <button
             onClick={() => setActiveTab('roleplay')}
@@ -787,9 +788,6 @@ function KeySettingsModal({ keyInput, setKeyInput, onSave, onDemo, onClose }) {
   );
 }
 
-// ============================================================================
-// ABA 1: ROLEPLAY + CORREÇÃO INTELIGENTE + EXERCÍCIOS ESTRUTURADOS
-// ============================================================================
 function RoleplayTab({ profile, apiKey, demoMode }) {
   const [selectedScenario, setSelectedScenario] = useState(null);
   const [customTopic, setCustomTopic] = useState('');
@@ -798,11 +796,9 @@ function RoleplayTab({ profile, apiKey, demoMode }) {
   const [loadingReply, setLoadingReply] = useState(false);
   const [translatedIds, setTranslatedIds] = useState({});
 
-  // Sugestões de resposta ("Me ajude a responder")
   const [suggestions, setSuggestions] = useState([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
-  // Modal de Correção Inteligente + 2 Exercícios
   const [correctionData, setCorrectionData] = useState(null);
   const [loadingCorrection, setLoadingCorrection] = useState(false);
   const [exerciseAnswers, setExerciseAnswers] = useState({});
@@ -813,21 +809,22 @@ function RoleplayTab({ profile, apiKey, demoMode }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loadingReply]);
 
-  const startScenario = async (scenario) => {
+  const startScenario = (scenario) => {
     setSelectedScenario(scenario);
     setSuggestions([]);
     setTranslatedIds({});
-    const initialMsg = {
-      id: Date.now().toString(),
-      sender: 'ai',
-      en: scenario.starterEn,
-      pt: scenario.starterPt
-    };
-    setMessages([initialMsg]);
+    setMessages([
+      {
+        id: Date.now().toString(),
+        sender: 'ai',
+        en: scenario.starterEn,
+        pt: scenario.starterPt
+      }
+    ]);
     speakEnglish(scenario.starterEn, profile.nivel === 'Iniciante' ? 0.85 : 1.0);
   };
 
-  const startCustomScenario = async (e) => {
+  const startCustomScenario = (e) => {
     e.preventDefault();
     if (!customTopic.trim()) return;
     const topic = customTopic.trim();
@@ -872,7 +869,7 @@ function RoleplayTab({ profile, apiKey, demoMode }) {
           {
             id: (Date.now() + 1).toString(),
             sender: 'ai',
-            en: "That sounds great! Would you like anything else with that today?",
+            en: 'That sounds great! Would you like anything else with that today?',
             pt: 'Isso parece ótimo! Você gostaria de mais alguma coisa hoje?'
           }
         ]);
@@ -903,13 +900,15 @@ Respond ONLY with valid JSON:
         jsonMode: true
       });
 
-      const aiMsg = {
-        id: (Date.now() + 1).toString(),
-        sender: 'ai',
-        en: res.reply_en,
-        pt: res.reply_pt
-      };
-      setMessages((prev) => [...prev, aiMsg]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          sender: 'ai',
+          en: res.reply_en,
+          pt: res.reply_pt
+        }
+      ]);
       speakEnglish(res.reply_en, profile.nivel === 'Iniciante' ? 0.85 : 1.0);
     } catch (err) {
       setMessages((prev) => [
@@ -917,8 +916,8 @@ Respond ONLY with valid JSON:
         {
           id: (Date.now() + 1).toString(),
           sender: 'ai',
-          en: 'Sorry, I had a connection hiccup. Could you repeat that?',
-          pt: `Erro ao conectar com Gemini: ${err.message}`
+          en: 'Sorry, the server is busy right now. Could you send that again?',
+          pt: err.message
         }
       ]);
     } finally {
@@ -1092,7 +1091,6 @@ Retorne APENAS um JSON válido com esta estrutura exata:
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
-      {/* Barra do Cenário */}
       <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
         <button
           onClick={() => setSelectedScenario(null)}
@@ -1113,7 +1111,6 @@ Retorne APENAS um JSON válido com esta estrutura exata:
         </button>
       </div>
 
-      {/* Área de Mensagens */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50">
         {messages.map((msg) => (
           <div
@@ -1180,7 +1177,6 @@ Retorne APENAS um JSON válido com esta estrutura exata:
         <div ref={chatEndRef} />
       </div>
 
-      {/* Sugestões de Resposta */}
       {(loadingSuggestions || suggestions.length > 0) && (
         <div className="px-3 py-2 bg-amber-50 border-t border-amber-200 space-y-1.5">
           <div className="flex items-center justify-between">
@@ -1211,7 +1207,6 @@ Retorne APENAS um JSON válido com esta estrutura exata:
         </div>
       )}
 
-      {/* Campo de Envio */}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -1235,7 +1230,6 @@ Retorne APENAS um JSON válido com esta estrutura exata:
         </button>
       </form>
 
-      {/* Modal de Correção Inteligente + Exercícios */}
       {(loadingCorrection || correctionData) && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-3 z-50">
           <div className="w-full max-w-md bg-white rounded-3xl p-5 max-h-[85vh] overflow-y-auto space-y-4 shadow-2xl">
@@ -1343,9 +1337,6 @@ Retorne APENAS um JSON válido com esta estrutura exata:
   );
 }
 
-// ============================================================================
-// ABA 2: ESTÚDIO DE PRONÚNCIA (MICROFONE + ANÁLISE MULTIMODAL GEMINI)
-// ============================================================================
 function PronunciationTab({ profile, apiKey, demoMode }) {
   const [target, setTarget] = useState({
     en: 'Could I have a bottle of water, please?',
@@ -1410,7 +1401,10 @@ Retorne APENAS JSON:
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        audioBitsPerSecond: 32000
+      });
       chunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
@@ -1507,7 +1501,7 @@ Avalie a pronúncia, clareza e entonação. Retorne APENAS um JSON válido:
       });
       setFeedback(res);
     } catch (err) {
-      alert(`Erro na análise de pronúncia: ${err.message}`);
+      alert(`Aviso na análise de pronúncia: ${err.message}`);
     } finally {
       setAnalyzing(false);
     }
@@ -1530,7 +1524,6 @@ Avalie a pronúncia, clareza e entonação. Retorne APENAS um JSON válido:
         </button>
       </div>
 
-      {/* Card da Frase Alvo */}
       <div className="p-5 bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-3xl shadow-md space-y-4">
         <p className="text-lg font-bold leading-snug">{target.en}</p>
         <p className="text-xs text-indigo-100">{target.pt}</p>
@@ -1557,7 +1550,6 @@ Avalie a pronúncia, clareza e entonação. Retorne APENAS um JSON válido:
         {target.tip}
       </div>
 
-      {/* Botão de Gravação */}
       <div className="flex flex-col items-center py-3 space-y-3">
         {!isRecording ? (
           <button
@@ -1579,12 +1571,11 @@ Avalie a pronúncia, clareza e entonação. Retorne APENAS um JSON válido:
           {isRecording
             ? `Gravando... 00:0${seconds} (Toque para parar)`
             : analyzing
-            ? 'O Gemini está ouvindo sua pronúncia...'
+            ? 'Analisando sua pronúncia...'
             : 'Toque no microfone e leia a frase acima'}
         </span>
       </div>
 
-      {/* Resultado da Análise */}
       {feedback && (
         <div className="p-4 bg-white border border-slate-200 rounded-3xl space-y-4 shadow-xs">
           <div className="flex items-center justify-between">
@@ -1624,9 +1615,6 @@ Avalie a pronúncia, clareza e entonação. Retorne APENAS um JSON válido:
   );
 }
 
-// ============================================================================
-// ABA 3: DITADO INTERATIVO (OUVIR E ESCREVER)
-// ============================================================================
 function DictationTab({ profile, apiKey, demoMode }) {
   const [challenge, setChallenge] = useState({
     en: 'We are going to visit our grandparents this Sunday.',
@@ -1718,7 +1706,6 @@ Retorne APENAS JSON:
         </button>
       </div>
 
-      {/* Painel de Áudio */}
       <div className="p-5 bg-slate-900 text-white rounded-3xl space-y-4 text-center">
         <div className="w-12 h-12 bg-indigo-500/20 text-indigo-300 rounded-2xl flex items-center justify-center mx-auto">
           <Headphones className="w-6 h-6" />
@@ -1743,7 +1730,6 @@ Retorne APENAS JSON:
         </div>
       </div>
 
-      {/* Campo de Resposta */}
       <div className="space-y-3">
         <textarea
           rows={3}
@@ -1764,7 +1750,6 @@ Retorne APENAS JSON:
         </button>
       </div>
 
-      {/* Correção Visual */}
       {checked && (
         <div className="p-4 bg-white border border-slate-200 rounded-3xl space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
