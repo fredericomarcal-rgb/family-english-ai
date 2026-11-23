@@ -152,18 +152,36 @@ async function callGemini({ apiKey, contents, systemInstruction, jsonMode = fals
     };
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      if (jsonMode) {
+        const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        return JSON.parse(cleaned);
+      }
+      return text;
+    }
+
+    if ((res.status === 503 || res.status === 429) && tentativa < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      continue;
+    }
+
     const errData = await res.json().catch(() => ({}));
-    const msg = errData?.error?.message || `Erro HTTP ${res.status}`;
+    const msg =
+      res.status === 503
+        ? 'O servidor do Gemini está momentaneamente ocupado. Tenta novamente dentro de alguns segundos.'
+        : errData?.error?.message || `Erro HTTP ${res.status}`;
     throw new Error(msg);
   }
-
+}
   const data = await res.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   if (jsonMode) {
