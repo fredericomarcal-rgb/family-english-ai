@@ -136,7 +136,7 @@ function speakEnglish(text, rate = 1.0) {
   window.speechSynthesis.speak(utterance);
 }
 
-// Helper para chamar a API REST do Gemini
+// Helper para chamar a API REST do Gemini com tentativas automáticas em picos de procura
 async function callGemini({ apiKey, contents, systemInstruction, jsonMode = false }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const body = {
@@ -177,18 +177,10 @@ async function callGemini({ apiKey, contents, systemInstruction, jsonMode = fals
     const errData = await res.json().catch(() => ({}));
     const msg =
       res.status === 503
-        ? 'O servidor do Gemini está momentaneamente ocupado. Tenta novamente dentro de alguns segundos.'
+        ? 'O servidor do Gemini está momentaneamente ocupado. Tente novamente dentro de alguns segundos.'
         : errData?.error?.message || `Erro HTTP ${res.status}`;
     throw new Error(msg);
   }
-}
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  if (jsonMode) {
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    return JSON.parse(cleaned);
-  }
-  return text;
 }
 
 export default function App() {
@@ -265,7 +257,7 @@ export default function App() {
     const updated = [...placementAnswers];
     updated[stepIndex] = option;
     setPlacementAnswers(updated);
-    setPlacementStep(stepIndex + 2); // vai para próximo passo (até 5)
+    setPlacementStep(stepIndex + 2);
   };
 
   const finishPlacementTest = async (skippedWriting = false) => {
@@ -300,7 +292,6 @@ Retorne APENAS um JSON válido com as chaves:
           jsonMode: true
         });
       } catch (err) {
-        // Fallback determinístico caso ocorra falha de rede
         if (totalScore >= 7 && writtenText.length > 15) {
           result = {
             nivel: 'Avançado',
@@ -318,7 +309,6 @@ Retorne APENAS um JSON válido com as chaves:
         }
       }
     } else {
-      // Modo demonstração
       if (totalScore >= 7 && writtenText.length > 10) {
         result = {
           nivel: 'Avançado',
